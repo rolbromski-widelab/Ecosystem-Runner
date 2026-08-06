@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1024">
+<title>Ecosystem Runner</title>
+<style>
+  :root{
+    --xb-purple:#5009E5;
+    --xb-purple-bg:#F6F5FF;
+    --xb-teal:#0097A7;
+    --xb-dark:#1D1D1D;
+    --xb-body:#595959;
+    --xb-border:#E0E0E0;
+  }
+  body{ margin:0; padding:0; background:#fff; }
+
+  /* ---------- komponent gry (wszystko pod .xb-runner, zero wycieku globalnego CSS) ---------- */
+  /* 720 px = docelowa szerokość sekcji onboardingowej. Rendering canvasu jest 1:1. */
+  .xb-runner{position:relative;width:720px;max-width:100%;user-select:none}
+  .xb-runner *{box-sizing:border-box}
+
+  .xb-hud{
+    display:flex;align-items:center;gap:14px;
+    padding:10px 14px;background:#fff;
+    border:1px solid var(--xb-border);border-bottom:none;
+    border-radius:10px 10px 0 0;font-size:13px;
+  }
+  .xb-stat{display:flex;flex-direction:column;line-height:1.25}
+  .xb-stat .k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--xb-body)}
+  .xb-stat .v{font-size:17px;font-weight:650;font-variant-numeric:tabular-nums}
+  .xb-stat .v.accent{color:var(--xb-purple)}
+  .xb-tier{margin-left:auto;display:flex;align-items:center;gap:9px;min-width:230px}
+  .xb-tier-badge{
+    background:var(--xb-purple);color:#fff;font-size:11px;font-weight:650;
+    letter-spacing:.04em;padding:4px 9px;border-radius:999px;white-space:nowrap;
+  }
+  .xb-bar{flex:1;height:6px;background:var(--xb-purple-bg);border-radius:999px;overflow:hidden}
+  .xb-bar i{display:block;height:100%;width:0;background:var(--xb-teal);transition:width .18s ease-out}
+  .xb-next{font-size:11px;color:var(--xb-body);white-space:nowrap;font-variant-numeric:tabular-nums}
+
+  .xb-stage{position:relative;border:1px solid var(--xb-border);border-radius:0 0 10px 10px;overflow:hidden;background:var(--xb-purple-bg)}
+  .xb-stage canvas{display:block;width:100%;height:auto}
+
+  .xb-toast{
+    position:absolute;left:50%;top:14px;transform:translateX(-50%) translateY(-8px);
+    background:var(--xb-dark);color:#fff;font-size:12px;font-weight:600;
+    padding:7px 14px;border-radius:999px;opacity:0;pointer-events:none;
+    transition:opacity .2s,transform .2s;white-space:nowrap;
+  }
+  .xb-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .xb-toast.tier{background:var(--xb-purple)}
+
+  .xb-overlay{
+    position:absolute;inset:0;background:rgba(255,255,255,.94);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:20px;
+  }
+  .xb-overlay[hidden]{display:none}
+  .xb-overlay h2{margin:0 0 4px;font-size:20px}
+  .xb-overlay p{margin:0;font-size:13px;color:var(--xb-body)}
+  .xb-summary{display:flex;gap:28px;margin:16px 0 14px}
+  .xb-summary div{text-align:center}
+  .xb-summary .k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--xb-body)}
+  .xb-summary .v{font-size:24px;font-weight:700;color:var(--xb-purple);font-variant-numeric:tabular-nums}
+  .xb-btn{
+    background:var(--xb-purple);color:#fff;border:0;border-radius:8px;
+    padding:10px 20px;font:inherit;font-size:14px;font-weight:600;cursor:pointer;
+  }
+  .xb-btn:hover{filter:brightness(1.1)}
+</style>
+</head>
+<body>
+<div id="game"></div>
+
+<script>
+/* ====================================================================
+   ECOSYSTEM RUNNER — silnik
+   Samowystarczalny komponent. Jedyny globalny symbol: window.EcosystemRunner
+   Montaż:  EcosystemRunner.mount('#selector', { assets, partners })
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  /* ---------- brand ---------- */
+  var C = {
+    purple:'#5009E5', purpleBg:'#F6F5FF', teal:'#0097A7',
+    dark:'#1D1D1D', body:'#595959', border:'#E0E0E0', white:'#FFFFFF'
+  };
+
+  /* ---------- stałe świata ---------- */
+  var CFG = {
+    // Pole 720 px = szerokość sekcji onboardingowej. Rendering 1:1, bez skalowania CSS.
+    // GROUND_Y obniżone z 252 na 276 — cała scena (gracz, przeszkody, logotypy,
+    // podłoże, hitboxy) wywodzi się z tej jednej stałej, więc to jedyna zmiana.
+    // Pasek ziemi pod linią ma teraz 24 px (było 48), pas czytelności to y 194–276.
+    W:720, H:300, GROUND_Y:276,
+    // Skok jest "snappy", nie floaty — przy 720 px na floaty skok nie ma miejsca.
+    // apogeum ≈ 141 px, czas w powietrzu ≈ 0.49 s (przy 960 px było 152 px / 0.65 s).
+    // Jeden skok, koniec. W powietrzu nie da się nic zrobić poza przyspieszeniem spadku (↓).
+    GRAVITY:4700, JUMP_V:-1150, FAST_FALL:3600,
+    // SPEED_MAX obcięte z 940 → 760: przy 720 px gracz widzi przeszkodę 648 px przed sobą,
+    // a skok zajmuje 372 px. Zostaje 0.36 s na reakcję. Przy 940 px/s zostawało 0.03 s = gra nie do wygrania.
+    SPEED_BASE:340, SPEED_GAIN:13, SPEED_MAX:760,
+    PLAYER_X:72, PLAYER_W:46, PLAYER_H:56, DUCK_H:34,
+    OVERLAP_UNIT:10,
+    HIT_HOLD:0.85,        // ile sekund widać klatkę zderzenia zanim wjedzie podsumowanie
+    HITBOX_INSET_X:7, HITBOX_INSET_Y:4   // hitbox mniejszy od sprite'a = gra wydaje się sprawiedliwa
+  };
+
+  /* ---------- drabinka tierów (nazwy = realne plany Crossbeam) ----------
+     Tier NIE wpływa na rozgrywkę. Brak tarczy, brak dodatkowego skoku, brak magnesu.
+     Jedyny efekt to mnożnik overlapów — tier jest nagrodą, nie ułatwieniem.
+     Wyjątek nie-ułatwiający: Connector otwiera wysoki pas logotypów, czyli
+     dodaje trudniejsze cele, a nie pomoc.                                      */
+  var TIERS = [
+    { name:'Explorer',     at:0,  perk:'start',                    speedBonus:0,  mult:1    },
+    { name:'Connector',    at:5,  perk:'partner logos appear in the high lane',  speedBonus:25, mult:1    },
+    { name:'Supernode',    at:12, perk:'×1.5 overlaps',             speedBonus:45, mult:1.5  },
+    { name:'Enterprise',   at:20, perk:'×1.75 overlaps',            speedBonus:65, mult:1.75 },
+    { name:'Gravity Node', at:30, perk:'×2 overlaps',               speedBonus:85, mult:2    }
+  ];
+
+  /* ---------- typy przeszkód (wymiary = kontrakt dla assetów) ---------- */
+  var OBSTACLES = [
+    { key:'block_s',  w:30, h:48,  air:0,   weight:26 },
+    { key:'block_m',  w:42, h:62,  air:0,   weight:24 },
+    { key:'block_l',  w:66, h:50,  air:0,   weight:16 },
+    { key:'block_xl', w:88, h:44,  air:0,   weight:10 },
+    // air dobrane geometrycznie: hitbox gracza stojącego = y 224–276, kucającego = y 246–276.
+    // air 10 → trafia oba (trzeba skoczyć).  air 40 → trafia tylko stojącego (trzeba kucnąć).
+    // Wartości są liczone względem GROUND_Y, więc przy zmianie linii podłoża jadą razem z nią.
+    { key:'flyer_lo', w:46, h:32,  air:10,  weight:12 },
+    { key:'flyer_hi', w:46, h:32,  air:40,  weight:12 }
+  ];
+  function byKey(k) {
+    for (var i = 0; i < OBSTACLES.length; i++) if (OBSTACLES[i].key === k) return OBSTACLES[i];
+    return null;
+  }
+
+  /* ---------- fale: co w danym momencie MOŻE się pojawić ----------
+     Ptaki wchodzą dopiero od fali 3 (44 s, do przeskoczenia) i 4 (62 s, do kucnięcia). */
+  var G_ALL = ['block_s','block_m','block_l','block_xl','flyer_lo','flyer_hi'];
+  var STAGES = [
+    { at:0,   label:'warm-up',  keys:['block_s','block_m'] },
+    { at:14,  label:'ramp',     keys:['block_s','block_m','block_l'] },
+    { at:28,  label:'wide',     keys:['block_s','block_m','block_l','block_xl'] },
+    { at:44,  label:'flyers',   keys:['block_s','block_m','block_l','block_xl','flyer_lo'] },
+    { at:62,  label:'ducking',  keys:G_ALL },
+    { at:82,  label:'pressure', keys:G_ALL },
+    { at:105, label:'endgame',  keys:G_ALL }
+  ];
+
+  /* ---------- wzorce: JAK przeszkody są ułożone ----------
+     To jest odpowiedź na „przeszkody pojawiają się w stałym rytmie".
+     Zamiast jednej formuły odstępu losujemy wzorzec z biblioteki, a po nim
+     dajemy oddech o LOSOWEJ długości. Rytm jest łamany na dwa sposoby:
+     wzorzec bywa serią 2–3 skoków pod rząd, a przerwa między wzorcami
+     waha się od „ledwo uczciwej" do wyraźnego wytchnienia.
+
+       single    ▮              jedna przeszkoda
+       wall2     ▮▮             dwie obok siebie — jeden skok przez obie
+       wall3     ▮▮▮            trzy obok siebie — jeden długi skok
+       hop2      ▮  ▮           skok, ląduj, natychmiast skacz znowu
+       hop3      ▮  ▮  ▮        trzy szybkie skoki pod rząd
+       jumpduck  ▮  ~           przeskocz blok, wyląduj, kucnij pod ptakiem
+       duckjump  ~  ▮           kucnij pod ptakiem, wstań, przeskocz blok
+       hop2duck  ▮  ▮  ~        dwa skoki i kucnięcie
+       birdgate  ~  ▮  ~        ptak, blok, ptak — kucnij, skocz, kucnij     */
+  var PATTERNS = [
+    { id:'single',   from:0, base:36, growth:-4.0 },
+    { id:'wall2',    from:1, base:11, growth: 1.4 },
+    { id:'hop2',     from:2, base: 9, growth: 2.2 },
+    { id:'wall3',    from:3, base: 6, growth: 1.5 },
+    { id:'jumpduck', from:4, base: 8, growth: 2.0 },
+    { id:'hop3',     from:5, base: 5, growth: 2.4, heavy:1 },
+    { id:'duckjump', from:5, base: 5, growth: 1.7 },
+    { id:'hop2duck', from:6, base: 4, growth: 2.6, heavy:1 },
+    { id:'birdgate', from:6, base: 4, growth: 2.2, heavy:1 }
+  ];
+
+  /* Wszystkie odległości są liczone w wielokrotnościach ZASIĘGU SKOKU (A), nie w pikselach.
+     Dzięki temu wymagany refleks jest niezależny od prędkości — zacieśnia go tylko `tight`.
+
+     DWA ZEGARY, bo jeden by się wyczerpał:
+       tight  0 → 1 przez pierwsze 130 s — ściska geometrię (odstępy, szerokość ścian).
+              Zatrzymuje się na 1, bo niżej ~165 ms przestaje być kwestią refleksu.
+       late   0 → 1 między 130 i 220 s — nie rusza już geometrii, tylko KOMPOZYCJĘ:
+              łańcuchuje dwa wzorce w jedną serię i wypycha z losowania proste układy.
+              To dlatego gra nie ma drugiego plateau.                              */
+  function difficulty(t) {
+    var i = 0;
+    for (var k = 0; k < STAGES.length; k++) if (t >= STAGES[k].at) i = k;
+    var st = STAGES[i];
+    var tight = Math.min(1, t / 130);
+    var late  = Math.max(0, Math.min(1, (t - 130) / 90));
+    return {
+      idx:i, label:st.label, keys:st.keys, tight:tight, late:late,
+      // Odstęp w serii skoków: 1.66·A → 1.34·A. Podłoga 1.34, nie 1.28, z powodu
+      // asymetrii: szeroki blok przed wąskim to najgorszy przypadek (wąski wymaga
+      // dłuższego rozbiegu), przy 1.28 zostawało 99 ms — poniżej progu refleksu.
+      hop:      1.66 - 0.32 * tight,
+      wallFrac: 0.38 + 0.22 * tight,               // maks. szerokość ściany jako część A
+      restMin:  2.00 - 0.66 * tight - 0.22 * late, // oddech po serii
+      restMax:  3.35 - 1.25 * tight - 0.45 * late,
+      breather: 0.20 - 0.08 * tight,               // szansa na wyraźne wytchnienie
+      chain:    0.45 * late                        // szansa na zlepienie dwóch wzorców w jeden gauntlet
+    };
+  }
+
+  /* =================================================================== */
+  function mount(target, opts) {
+    opts = opts || {};
+    var root = typeof target === 'string' ? document.querySelector(target) : target;
+    if (!root) throw new Error('EcosystemRunner: nie znaleziono kontenera ' + target);
+
+    var ASSETS  = opts.assets  || {};
+    var PARTNERS = (opts.partners && opts.partners.length) ? opts.partners.slice() : fallbackPartners();
+    /* Warstwy tła (parallax). Puste = jednolite tło + proceduralne chmury.
+       Każda warstwa: { src, tileW, tileH, par, y | bottom, front }
+         par     0 = statyczna (bez kafelkowania), 0.10 = daleka, 0.26 = bliska
+         y       odległość górnej krawędzi od GÓRY canvasu
+         bottom  odległość dolnej krawędzi od DOŁU canvasu (semantyka CSS)
+                   bottom:0  → przyklejone do dolnej krawędzi kadru (y = 300)
+                   bottom:48 → przyklejone do linii podłoża (y = 252)
+         front   true = rysowana PO pasku podłoża (nakłada się na ziemię),
+                 ale nadal pod przeszkodami i graczem */
+    var LAYERS = ASSETS.layers || [];
+
+    /* ---------- DOM ---------- */
+    root.className = 'xb-runner';
+    root.innerHTML =
+      '<div class="xb-hud">' +
+        '<div class="xb-stat"><span class="k">Partners connected</span><span class="v accent" data-p>0</span></div>' +
+        '<div class="xb-stat"><span class="k">Overlaps found</span><span class="v" data-o>0</span></div>' +
+        '<div class="xb-stat"><span class="k">Distance</span><span class="v" data-d>0 m</span></div>' +
+        '<div class="xb-tier">' +
+          '<span class="xb-tier-badge" data-tier>Explorer</span>' +
+          '<span class="xb-bar"><i data-bar></i></span>' +
+          '<span class="xb-next" data-next>5 to Connector</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="xb-stage">' +
+        '<canvas></canvas>' +
+        '<div class="xb-toast" data-toast></div>' +
+        '<div class="xb-overlay" data-overlay></div>' +
+      '</div>';
+
+    var cv     = root.querySelector('canvas');
+    var ctx    = cv.getContext('2d');
+    var elP    = root.querySelector('[data-p]');
+    var elO    = root.querySelector('[data-o]');
+    var elD    = root.querySelector('[data-d]');
+    var elTier = root.querySelector('[data-tier]');
+    var elBar  = root.querySelector('[data-bar]');
+    var elNext = root.querySelector('[data-next]');
+    var elToast= root.querySelector('[data-toast]');
+    var elOv   = root.querySelector('[data-overlay]');
+
+    /* ---------- canvas w rozdzielczości ekranu ---------- */
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width  = CFG.W * dpr;
+    cv.height = CFG.H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.textBaseline = 'middle';
+
+    /* zaokrąglony prostokąt — buduje ścieżkę na lokalnym ctx (Path2D.roundRect nie jest wszędzie dostępne) */
+    function roundRect(x, y, w, h, r) {
+      r = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y,     x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x,     y + h, r);
+      ctx.arcTo(x,     y + h, x,     y,     r);
+      ctx.arcTo(x,     y,     x + w, y,     r);
+      ctx.closePath();
+    }
+
+    /* ---------- stan ---------- */
+    var S = null;
+    var images = {};
+    var keys = {};
+    var showHitbox = false;
+    var raf = null, lastT = 0, toastTimer = null;
+
+    function freshState() {
+      return {
+        phase:'ready',            // ready | running | paused | over
+        t:0, dist:0, speed:CFG.SPEED_BASE,
+        partners:0, overlaps:0, tier:0,
+        player:{ y:CFG.GROUND_Y, vy:0, onGround:true, h:CFG.PLAYER_H, ducking:false, animT:0, runPhase:0 },
+        obstacles:[], pickups:[], floaters:[], clouds:seedClouds(), groundX:0,
+        layerX:LAYERS.map(function () { return 0; }),
+        nextObstacleIn:520, stage:null, hitT:0,
+        deck:shuffle(PARTNERS.map(function(_,i){ return i; })),
+        deckPtr:0,
+        best: readBest()
+      };
+    }
+
+    /* =============== input =============== */
+    function onKeyDown(e) {
+      if (e.repeat) return;          // przytrzymanie klawisza nie generuje kolejnych skoków
+      var k = e.key;
+      if (k === ' ' || k === 'ArrowUp' || k === 'ArrowDown' || k === 'Spacebar') e.preventDefault();
+      keys[k] = true;
+
+      if (k === 'h' || k === 'H') { showHitbox = !showHitbox; return; }
+      if (k === 'r' || k === 'R') { start(); return; }
+      if (k === 'p' || k === 'P') {
+        if (S.phase === 'running') { S.phase = 'paused'; renderOverlay(); }
+        else if (S.phase === 'paused') { S.phase = 'running'; renderOverlay(); }
+        return;
+      }
+      if (k === ' ' || k === 'Spacebar' || k === 'ArrowUp') {
+        if (S.phase === 'ready') { S.phase = 'running'; renderOverlay(); }
+        else if (S.phase === 'hit') { finishOver(); }     // pominięcie pauzy po zderzeniu
+        else if (S.phase === 'over') { start(); }
+        else if (S.phase === 'running') { jump(); }
+      }
+    }
+    function onKeyUp(e) { keys[e.key] = false; }
+
+    /* Jeden skok i tylko z ziemi. Będąc w powietrzu nie da się skoczyć ponownie. */
+    function jump() {
+      var p = S.player;
+      if (!p.onGround) return;
+      p.vy = CFG.JUMP_V;
+      p.onGround = false;
+      p.ducking = false;
+    }
+
+    /* =============== pętla =============== */
+    function loop(t) {
+      raf = requestAnimationFrame(loop);
+      var dt = Math.min((t - lastT) / 1000, 1 / 30);
+      lastT = t;
+      if (S.phase === 'running') update(dt);
+      /* Faza 'hit': świat zamrożony, widoczna klatka zderzenia. Po HIT_HOLD sekundach
+         wjeżdża ekran podsumowania. Bez tej pauzy overlay zasłaniałby klatkę zderzenia
+         w tej samej ramce, w której się pojawia — gracz nigdy by jej nie zobaczył. */
+      if (S.phase === 'hit') {
+        S.hitT += dt;
+        if (S.hitT >= CFG.HIT_HOLD) finishOver();
+      }
+      draw();
+    }
+
+    function update(dt) {
+      S.t += dt;
+      S.speed = Math.min(CFG.SPEED_MAX, CFG.SPEED_BASE + CFG.SPEED_GAIN * S.t + TIERS[S.tier].speedBonus);
+      var dx = S.speed * dt;
+      S.dist += dx;
+      // Bez modulo — reszta jest brana przy rysowaniu, osobno dla kafla obrazka (tileW)
+      // i dla proceduralnych kresek (40 px). Wcześniejsze `% 40` łamało kafel 960 px:
+      // obrazek szarpał się z powrotem co 40 px zamiast przewijać się w pętli.
+      S.groundX += dx;
+
+      /* --- gracz --- */
+      var p = S.player;
+      p.animT += dt;
+      /* Faza cyklu biegu. Jeśli asset podaje `stride` (długość jednego kroku w px
+         logicznych), tempo animacji jest liczone z prędkości gry — inaczej stopy
+         ślizgałyby się po ziemi. Przy stałych 12 fps i 760 px/s jeden krok musiałby
+         pokryć 127 px, czyli 2,75× szerokości postaci. Bez `stride` zachowanie
+         zostaje stare (stałe fps). */
+      p.runPhase += runFps() * dt;
+      p.ducking = !!(keys['ArrowDown'] && p.onGround);
+      p.h = p.ducking ? CFG.DUCK_H : CFG.PLAYER_H;
+
+      if (!p.onGround) {
+        // ↓ w powietrzu przyspiesza spadek — to jedyne, co można zrobić w locie,
+        // i jest kluczowe przy kombinacji "przeskocz, wyląduj, natychmiast kucnij"
+        p.vy += (keys['ArrowDown'] ? CFG.GRAVITY + CFG.FAST_FALL : CFG.GRAVITY) * dt;
+        p.y += p.vy * dt;
+        if (p.y >= CFG.GROUND_Y) { p.y = CFG.GROUND_Y; p.vy = 0; p.onGround = true; }
+      }
+
+      /* --- spawner --- */
+      S.nextObstacleIn -= dx;
+      if (S.nextObstacleIn <= 0) spawnWave();
+
+      /* --- przeszkody --- */
+      for (var i = S.obstacles.length - 1; i >= 0; i--) {
+        var o = S.obstacles[i];
+        o.x -= dx;
+        o.animT = (o.animT || 0) + dt;
+        if (o.x + o.w < -20) { S.obstacles.splice(i, 1); continue; }
+        if (hits(playerBox(), obsBox(o))) return gameOver();
+      }
+
+      /* --- logotypy ---
+         Brak magnesu i brak jakiegokolwiek przyciągania: logotyp trzeba trafić własnym torem lotu. */
+      for (var j = S.pickups.length - 1; j >= 0; j--) {
+        var u = S.pickups[j];
+        u.x -= dx;
+        u.bob += dt;
+        if (u.x < -40) { S.pickups.splice(j, 1); continue; }
+        if (hits(playerBox(), pickupBox(u))) { collect(u); S.pickups.splice(j, 1); }
+      }
+
+      /* --- warstwy tła --- */
+      for (var L = 0; L < LAYERS.length; L++) {
+        var tw = LAYERS[L].tileW || 1;
+        S.layerX[L] = (S.layerX[L] + dx * (LAYERS[L].par || 0)) % tw;
+      }
+
+      /* --- chmury i floatery --- */
+      for (var c = 0; c < S.clouds.length; c++) {
+        var cl = S.clouds[c];
+        cl.x -= dx * cl.par;
+        if (cl.x < -70) { cl.x = CFG.W + Math.random() * 200; cl.y = 30 + Math.random() * 80; }
+      }
+      for (var f = S.floaters.length - 1; f >= 0; f--) {
+        var fl = S.floaters[f];
+        fl.life -= dt; fl.y -= 34 * dt; fl.x -= dx;
+        if (fl.life <= 0) S.floaters.splice(f, 1);
+      }
+
+      syncHud();
+    }
+
+    /* =============== spawn =============== */
+    function makeObstacle(def, x) {
+      return { key:def.key, w:def.w, h:def.h, air:def.air, x:x, y:CFG.GROUND_Y - def.air - def.h, animT:0 };
+    }
+    function jumpSpan() {
+      return (2 * Math.abs(CFG.JUMP_V) / CFG.GRAVITY) * S.speed;   // ile px pokrywa jeden skok
+    }
+
+    /* Tempo cyklu biegu. `stride` = dystans w px, jaki świat przesuwa się na jedną
+       pełną pętlę klatek biegu. fps = klatki / (stride / v) = klatki × v / stride.
+       Dzięki temu tempo skaluje się z prędkością i stopy nie ślizgają się bardziej,
+       niż wynika z przyjętej wartości stride. */
+    function runFps() {
+      var sp = ASSETS.runner;
+      if (!sp) return 12;
+      if (sp.stride && sp.frames && sp.frames.run) {
+        return (sp.frames.run.length * S.speed) / sp.stride;
+      }
+      return sp.fps || 12;
+    }
+
+    function groundPool(d, maxW) {
+      var p = OBSTACLES.filter(function (o) {
+        return !o.air && d.keys.indexOf(o.key) >= 0 && (!maxW || o.w <= maxW);
+      });
+      return p.length ? pickWeighted(p) : byKey('block_s');
+    }
+
+    function pickPattern(d) {
+      var pool = [];
+      for (var i = 0; i < PATTERNS.length; i++) {
+        var p = PATTERNS[i];
+        if (d.idx < p.from) continue;
+        var w = p.base + p.growth * (d.idx - p.from);
+        if (p.id === 'single') w -= 8 * d.late;                   // proste układy znikają z czasem
+        else w += d.tight * 4 + (p.heavy ? d.late * 6 : 0);       // 3-elementowe zyskują
+        pool.push({ id:p.id, weight:Math.max(1, w) });
+      }
+      return pickWeighted(pool).id;
+    }
+
+    /* Buduje wzorzec jako listę {def, dx}. Wszystkie dx wyrażone przez A = zasięg skoku. */
+    function buildPattern(id, A, d) {
+      var fh = byKey('flyer_hi');
+      var hop = A * d.hop;
+      var g1, g2, g3, gap, bx;
+
+      switch (id) {
+        case 'wall2':
+          g1 = groundPool(d, A * d.wallFrac * 0.55);
+          gap = 30 + Math.random() * 22;
+          g2 = groundPool(d, Math.max(30, A * d.wallFrac - g1.w - gap));
+          return [{ def:g1, dx:0 }, { def:g2, dx:g1.w + gap }];
+
+        case 'wall3':
+          g1 = byKey('block_s'); g2 = byKey('block_s'); g3 = byKey('block_m');
+          if (g1.w + g2.w + g3.w + 56 > A * d.wallFrac) {
+            return [{ def:g1, dx:0 }, { def:g2, dx:g1.w + 30 }];   // za wąski łuk → tylko dwie
+          }
+          return [{ def:g1, dx:0 },
+                  { def:g2, dx:g1.w + 28 },
+                  { def:g3, dx:g1.w + 28 + g2.w + 28 }];
+
+        case 'hop2':
+          // maks. 66 px: block_xl w serii skoków tworzy nieuczciwie ciasne przejście
+          return [{ def:groundPool(d, 66), dx:0 },
+                  { def:groundPool(d, 66), dx:hop }];
+
+        case 'hop3':
+          return [{ def:groundPool(d, 66), dx:0 },
+                  { def:groundPool(d, 66), dx:hop },
+                  { def:groundPool(d, 66), dx:hop * 2 }];
+
+        case 'jumpduck':
+          g1 = groundPool(d, 66);
+          return [{ def:g1, dx:0 },
+                  { def:fh, dx:A * (0.95 - 0.17 * d.tight) }];
+
+        case 'duckjump':
+          g1 = groundPool(d, 66);
+          return [{ def:fh, dx:0 },
+                  { def:g1, dx:fh.w + A * (0.85 - 0.12 * d.tight) }];
+
+        case 'hop2duck':
+          g1 = groundPool(d, 66); g2 = groundPool(d, 66);
+          return [{ def:g1, dx:0 },
+                  { def:g2, dx:hop },
+                  { def:fh, dx:hop + A * (0.95 - 0.17 * d.tight) }];
+
+        case 'birdgate':
+          g1 = groundPool(d, 66);
+          bx = fh.w + A * (0.85 - 0.12 * d.tight);
+          return [{ def:fh, dx:0 },
+                  { def:g1, dx:bx },
+                  { def:fh, dx:bx + g1.w + A * (0.90 - 0.12 * d.tight) }];
+
+        default:
+          var pool = OBSTACLES.filter(function (o) { return d.keys.indexOf(o.key) >= 0; });
+          return [{ def:pickWeighted(pool), dx:0 }];
+      }
+    }
+
+    function spawnWave() {
+      var d = difficulty(S.t);
+      var A = jumpSpan();
+      var id = pickPattern(d);
+      var els = buildPattern(id, A, d);
+      d.pattern = id;
+      d.els = els.length;
+      S.stage = d;
+
+      var x0 = CFG.W + 20, tail = 0;
+      for (var i = 0; i < els.length; i++) {
+        S.obstacles.push(makeObstacle(els[i].def, x0 + els[i].dx));
+        tail = Math.max(tail, els[i].dx + els[i].def.w);
+      }
+
+      /* --- łańcuch: drugi wzorzec doklejony na odległość jednego skoku ---
+         Każde przejście zostaje uczciwe (hop·A), ale seria robi się 4–6 elementowa.
+         To jest jedyna dźwignia, która działa po 130 s, i to ona kończy przebiegi. */
+      if (Math.random() < d.chain) {
+        var id2 = pickPattern(d);
+        var els2 = buildPattern(id2, A, d);
+        var off = tail + A * d.hop * 0.95;
+        for (var j = 0; j < els2.length; j++) {
+          S.obstacles.push(makeObstacle(els2[j].def, x0 + off + els2[j].dx));
+          tail = Math.max(tail, off + els2[j].dx + els2[j].def.w);
+        }
+        d.pattern += ' + ' + id2;
+        d.els += els2.length;
+      }
+
+      /* --- logotypy --- */
+      if (Math.random() < 0.50) {
+        // w punkcie apogeum skoku nad pierwszym elementem — źródło ryzyka
+        var e0 = els[0].def;
+        addPickup(x0 + e0.w * 0.5 + 26,
+                  CFG.GROUND_Y - (e0.air ? e0.air + e0.h + 34 : e0.h + 60));
+      } else if (Math.random() < 0.5) {
+        // w strefie oddechu po wzorcu
+        var hi = S.tier >= 1 && Math.random() < 0.45;
+        addPickup(x0 + tail + A * 0.45 + Math.random() * 60,
+                  CFG.GROUND_Y - (hi ? 150 : 66) - Math.random() * 18);
+      }
+
+      /* --- oddech po wzorcu: LOSOWA długość, to ona łamie rytm --- */
+      var rest = d.restMin + Math.random() * (d.restMax - d.restMin);
+      if (Math.random() < d.breather) rest *= 1.55;
+      S.nextObstacleIn = tail + A * rest;
+    }
+
+    /* Talia służy już tylko temu, żeby logotypy nie powtarzały się jeden po drugim —
+       nie ma mechaniki „odkrywania firm". Po wyczerpaniu tasuje się od nowa. */
+    function addPickup(x, y) {
+      if (S.deckPtr >= S.deck.length) { S.deck = shuffle(S.deck); S.deckPtr = 0; }
+      var idx = S.deck[S.deckPtr++];
+      S.pickups.push({ x:x, y:Math.max(46, y), r:17, partner:idx, bob:Math.random() * 6 });
+    }
+
+    /* =============== zbieranie =============== */
+    function collect(u) {
+      S.partners++;
+      // n-ty partner wart n × bazę, przemnożone przez mnożnik tieru
+      var gain = Math.round(CFG.OVERLAP_UNIT * S.partners * TIERS[S.tier].mult);
+      S.overlaps += gain;
+
+      S.floaters.push({ x:u.x, y:u.y - 6, life:0.9, text:'+' + gain + ' overlaps' });
+      checkTier();
+    }
+
+    function checkTier() {
+      var next = S.tier + 1;
+      if (next < TIERS.length && S.partners >= TIERS[next].at) {
+        S.tier = next;
+        toast('Next tier: ' + TIERS[next].name + ' — ' + TIERS[next].perk, 'tier');
+      }
+    }
+
+    /* Kolizja → zamrożenie sceny i klatka zderzenia. Podsumowanie dopiero po HIT_HOLD. */
+    function gameOver() {
+      S.phase = 'hit';
+      S.hitT = 0;
+      renderOverlay();
+    }
+
+    function finishOver() {
+      S.phase = 'over';
+      if (S.overlaps > S.best) { S.best = S.overlaps; writeBest(S.best); }
+      syncHud();
+      renderOverlay();
+    }
+
+    /* =============== hitboxy =============== */
+    function playerBox() {
+      var p = S.player;
+      return {
+        x:CFG.PLAYER_X + CFG.HITBOX_INSET_X,
+        y:p.y - p.h + CFG.HITBOX_INSET_Y,
+        w:CFG.PLAYER_W - CFG.HITBOX_INSET_X * 2,
+        h:p.h - CFG.HITBOX_INSET_Y
+      };
+    }
+    function obsBox(o) {
+      return { x:o.x + 4, y:o.y + 3, w:o.w - 8, h:o.h - 5 };
+    }
+    function pickupBox(u) {
+      var r = u.r + 5;                       // hojny hitbox — zbieranie ma być przyjemne
+      return { x:u.x - r, y:u.y - r, w:r * 2, h:r * 2 };
+    }
+    function hits(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    /* =============== render =============== */
+    function draw() {
+      ctx.clearRect(0, 0, CFG.W, CFG.H);
+
+      // tło
+      ctx.fillStyle = C.purpleBg;
+      ctx.fillRect(0, 0, CFG.W, CFG.H);
+
+      drawLayers(false);
+
+      // proceduralne chmury — tylko gdy nie podano własnych warstw tła
+      if (!LAYERS.length) {
+        ctx.fillStyle = '#fff';
+        for (var i = 0; i < S.clouds.length; i++) {
+          var cl = S.clouds[i];
+          ctx.globalAlpha = 0.9;
+          roundRect(cl.x, cl.y, 56, 15, 8); ctx.fill();
+          roundRect(cl.x + 14, cl.y - 8, 32, 14, 7); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      drawGround();
+      drawLayers(true);      // warstwy front — na ziemi, ale pod przeszkodami i graczem
+
+      for (var o = 0; o < S.obstacles.length; o++) drawObstacle(S.obstacles[o]);
+      for (var u = 0; u < S.pickups.length; u++) drawPickup(S.pickups[u]);
+      drawPlayer();
+
+      // floatery
+      ctx.font = '600 13px -apple-system,Segoe UI,Roboto,sans-serif';
+      ctx.textAlign = 'center';
+      for (var f = 0; f < S.floaters.length; f++) {
+        var fl = S.floaters[f];
+        ctx.globalAlpha = Math.max(0, Math.min(1, fl.life / 0.5));
+        ctx.fillStyle = C.purple;
+        ctx.fillText(fl.text, fl.x, fl.y);
+      }
+      ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
+
+      if (showHitbox) drawHitboxes();
+    }
+
+    /* Rysuje warstwy tła w kolejności podania: pierwsza = najdalsza.
+       par:0 → warstwa statyczna, rysowana raz (gradient nieba, słońce).
+       par>0 → kafelkowana poziomo i przewijana z tym mnożnikiem prędkości gry.
+       front:true → pomijana w pierwszym przebiegu, rysowana po pasku podłoża. */
+    function drawLayers(front) {
+      for (var i = 0; i < LAYERS.length; i++) {
+        var cfg = LAYERS[i];
+        if (!!cfg.front !== !!front) continue;
+        var img = images['layer_' + i];
+        if (!img) continue;
+        var tw = cfg.tileW || img.width;
+        var th = cfg.tileH || img.height;
+        // bottom liczone od DOŁU canvasu (CSS): bottom:0 = przy dolnej krawędzi kadru
+        var y  = (cfg.bottom != null) ? CFG.H - cfg.bottom - th : (cfg.y || 0);
+        if (!cfg.par) { ctx.drawImage(img, 0, y, tw, th); continue; }
+        for (var x = -(S.layerX[i] % tw); x < CFG.W; x += tw) ctx.drawImage(img, x, y, tw, th);
+      }
+    }
+
+    function drawGround() {
+      var img = images.ground;
+      var gy = CFG.GROUND_Y;
+      if (img) {
+        var g  = ASSETS.ground || {};
+        var tw = g.tileW || img.width;
+        var th = g.tileH || img.height;
+        /* Trzy sposoby zakotwiczenia, w tej kolejności priorytetu:
+             surfaceAt — ZALECANY. Odległość powierzchni ziemi od GÓRY kafla (w px logicznych).
+                         Silnik sam ustawi ją na GROUND_Y, niezależnie od wysokości kafla.
+                         surfaceAt:0 = powierzchnia na samej górze grafiki.
+             bottom    — odległość dolnej krawędzi od DOŁU kadru (semantyka CSS).
+             (brak)    — górna krawędź kafla siada na linii podłoża.
+           Linia kolizji zostaje na GROUND_Y (obecnie 276) zawsze. Jeśli powierzchnia
+           w grafice nie wypadnie na tej wysokości, gracz będzie się unosił albo zapadał. */
+        var y;
+        if (g.surfaceAt != null)   y = gy - g.surfaceAt;
+        else if (g.bottom != null) y = CFG.H - g.bottom - th;
+        else                       y = gy;
+        var off = -(S.groundX % tw);
+        for (var x = off; x < CFG.W; x += tw) ctx.drawImage(img, x, y, tw, th);
+      } else {
+        ctx.strokeStyle = C.border; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(0, gy + 1); ctx.lineTo(CFG.W, gy + 1); ctx.stroke();
+        ctx.strokeStyle = '#CFCFE8'; ctx.lineWidth = 2;
+        for (var d = -(S.groundX % 40); d < CFG.W; d += 40) {
+          ctx.beginPath(); ctx.moveTo(d, gy + 9); ctx.lineTo(d + 16, gy + 9); ctx.stroke();
+        }
+      }
+    }
+
+    function drawPlayer() {
+      var p = S.player, x = CFG.PLAYER_X;
+      var sp = ASSETS.runner, img = images.runner;
+      /* Sprite rysowany ZAWSZE w tej samej skali (komórka → PLAYER_W × PLAYER_H),
+         niezależnie od stanu. Dolna krawędź komórki siada na stopach (p.y).
+         Wysokość sylwetki przy kucnięciu wynika z samej grafiki, a nie ze ściskania
+         komórki — inaczej poprawnie narysowany kucnięty bohater byłby spłaszczony.
+         `p.h` (56/34) pozostaje wyłącznie wymiarem HITBOXU. */
+      var y = p.y - CFG.PLAYER_H;
+      if (img && sp) {
+        var frames, fi;
+        if ((S.phase === 'hit' || S.phase === 'over') && sp.frames.hit) {
+          frames = sp.frames.hit;                       // klatka zderzenia, zamrożona
+          fi = frames[0];
+        } else if (p.ducking) {
+          frames = sp.frames.duck;
+          fi = frames[Math.floor(p.animT * (sp.fps || 12)) % frames.length];
+        } else if (!p.onGround) {
+          frames = sp.frames.jump;
+          fi = frames[Math.floor(p.animT * (sp.fps || 12)) % frames.length];
+        } else {
+          frames = sp.frames.run;                       // bieg — faza liczona z prędkości
+          fi = frames[Math.floor(p.runPhase) % frames.length];
+        }
+        var cols = Math.floor(img.width / sp.frameW);
+        var sx = (fi % cols) * sp.frameW, sy = Math.floor(fi / cols) * sp.frameH;
+        ctx.drawImage(img, sx, sy, sp.frameW, sp.frameH, x, y, CFG.PLAYER_W, CFG.PLAYER_H);
+      } else {
+        y = p.y - p.h;   // placeholder rysuje prostokąt o wysokości hitboxu
+        // placeholder: ciało + oko + animowane nogi
+        ctx.fillStyle = C.purple;
+        roundRect(x, y, CFG.PLAYER_W, p.h, 10); ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(x + CFG.PLAYER_W - 13, y + 14, 4.5, 0, 6.284); ctx.fill();
+        if (p.onGround && !p.ducking) {
+          var step = Math.floor(p.animT * 11) % 2;
+          ctx.fillStyle = C.teal;
+          ctx.fillRect(x + 8,  p.y - 7, 11, 7 + (step ? 0 : 4));
+          ctx.fillRect(x + 27, p.y - 7, 11, 7 + (step ? 4 : 0));
+        }
+      }
+    }
+
+    /* Wysokość RYSOWANIA przeszkody. Naziemne są przedłużane od górnej krawędzi
+       kolizji aż do dołu kadru (`bottom: 0`), żeby nie kończyły się na linii podłoża
+       i nie wyglądały, jakby stały na niej jak klocki. Hitbox pozostaje bez zmian —
+       nadal sięga tylko do GROUND_Y, więc balans jest nietknięty.
+       Latające rysują się dokładnie w swoim prostokącie.                          */
+    function obsDrawH(o) {
+      return o.air ? o.h : o.h + (CFG.H - CFG.GROUND_Y);
+    }
+
+    function drawObstacle(o) {
+      var conf = ASSETS.obstacles && ASSETS.obstacles[o.key];
+      var img = images['obs_' + o.key];
+      var dh = obsDrawH(o);
+      if (img && conf) {
+        if (conf.frames && conf.frames > 1) {
+          var fi = Math.floor(o.animT * (conf.fps || 8)) % conf.frames;
+          ctx.drawImage(img, fi * conf.frameW, 0, conf.frameW, conf.frameH, o.x, o.y, o.w, dh);
+        } else {
+          ctx.drawImage(img, o.x, o.y, o.w, dh);
+        }
+        return;
+      }
+      // placeholder
+      if (o.air) {
+        var flap = Math.floor(o.animT * 9) % 2;
+        ctx.fillStyle = C.teal;
+        roundRect(o.x, o.y + (flap ? 0 : 3), o.w, o.h - 6, 6); ctx.fill();
+        ctx.fillRect(o.x + 10, o.y + (flap ? -7 : o.h - 6), o.w - 22, 6);
+      } else {
+        ctx.fillStyle = C.teal;
+        roundRect(o.x, o.y, o.w, dh, 5); ctx.fill();       // przedłużony do dołu kadru
+        ctx.fillStyle = 'rgba(255,255,255,.28)';
+        ctx.fillRect(o.x + 5, o.y + 6, 4, dh - 12);
+      }
+    }
+
+    function drawPickup(u) {
+      var pr = PARTNERS[u.partner];
+      var y = u.y + Math.sin(u.bob * 3.4) * 3;
+
+      var img = images['logo_' + u.partner];
+
+      if (img) {
+        /* Logotypy partnerów to nieprzezroczyste kafle 160 × 160 z własnym tłem.
+           Wpisanie ich w koło (clip + skalowanie „cover") daje jednolity, okrągły
+           żeton niezależnie od koloru tła każdego logo. Wersja z białą kartą pod
+           spodem miała sens tylko dla logotypów z alfą — tu dałaby kwadrat w kole. */
+        ctx.save();
+        ctx.beginPath(); ctx.arc(u.x, y, u.r, 0, 6.284); ctx.clip();
+        var d2 = u.r * 2;
+        var sc = Math.max(d2 / img.width, d2 / img.height);
+        var w = img.width * sc, h = img.height * sc;
+        ctx.drawImage(img, u.x - w / 2, y - h / 2, w, h);
+        ctx.restore();
+        ctx.strokeStyle = C.white; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(u.x, y, u.r - 1, 0, 6.284); ctx.stroke();
+      } else {
+        // placeholder: biała karta z inicjałami
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(u.x, y, u.r, 0, 6.284); ctx.fill();
+        ctx.strokeStyle = C.purple; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(u.x, y, u.r, 0, 6.284); ctx.stroke();
+        ctx.fillStyle = C.purple;
+        ctx.font = '700 11px -apple-system,Segoe UI,Roboto,sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(initials(pr.name), u.x, y + 0.5);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    function drawHitboxes() {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#E5004D';
+      var b = playerBox(); ctx.strokeRect(b.x, b.y, b.w, b.h);
+      for (var i = 0; i < S.obstacles.length; i++) { var o = obsBox(S.obstacles[i]); ctx.strokeRect(o.x, o.y, o.w, o.h); }
+      ctx.strokeStyle = C.teal;
+      for (var j = 0; j < S.pickups.length; j++) { var u = pickupBox(S.pickups[j]); ctx.strokeRect(u.x, u.y, u.w, u.h); }
+      ctx.fillStyle = C.dark;
+      ctx.font = '11px monospace';
+      var d = S.stage || difficulty(S.t);
+      ctx.fillText('t ' + S.t.toFixed(1) + 's · v ' + Math.round(S.speed) + ' · wave ' + d.idx +
+                   ' ' + d.label + ' · tight ' + d.tight.toFixed(2) +
+                   ' · late ' + d.late.toFixed(2), 10, 16);
+      ctx.fillText('pattern: ' + (d.pattern || '—') + ' (' + (d.els || 1) + ' el.)', 10, 30);
+      ctx.fillText('hop ' + d.hop.toFixed(2) + '·A · rest ' + d.restMin.toFixed(2) + '–' +
+                   d.restMax.toFixed(2) + '·A · chain ' + Math.round(d.chain * 100) +
+                   '% · A=' + Math.round(jumpSpan()) + 'px', 10, 44);
+    }
+
+    /* =============== HUD =============== */
+    function syncHud() {
+      set(elP, S.partners);
+      set(elO, S.overlaps.toLocaleString('en-US'));
+      set(elD, Math.round(S.dist / 10) + ' m');
+      set(elTier, TIERS[S.tier].name);
+      var nx = TIERS[S.tier + 1];
+      if (nx) {
+        var span = nx.at - TIERS[S.tier].at;
+        var got = S.partners - TIERS[S.tier].at;
+        elBar.style.width = Math.max(0, Math.min(100, (got / span) * 100)) + '%';
+        set(elNext, (nx.at - S.partners) + ' to ' + nx.name);
+      } else {
+        elBar.style.width = '100%';
+        set(elNext, 'max tier');
+      }
+    }
+    function set(el, v) {
+      v = String(v);
+      if (el.textContent !== v) el.textContent = v;
+    }
+
+    function toast(msg, cls) {
+      elToast.textContent = msg;
+      elToast.className = 'xb-toast show ' + (cls || '');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { elToast.className = 'xb-toast ' + (cls || ''); }, 1600);
+    }
+
+    function renderOverlay() {
+      // w fazie 'hit' overlay musi być schowany, żeby było widać klatkę zderzenia
+      if (S.phase === 'running' || S.phase === 'hit') { elOv.hidden = true; return; }
+      elOv.hidden = false;
+
+      if (S.phase === 'ready') {
+        elOv.innerHTML =
+          '<h2>Ecosystem Runner</h2>' +
+          '<p>Dodge obstacles, connect partners. Every partner you connect is worth more overlaps than the last.</p>' +
+          '<div style="height:14px"></div>' +
+          '<button class="xb-btn">Start — Space</button>';
+        elOv.querySelector('button').onclick = function () { S.phase = 'running'; renderOverlay(); };
+        return;
+      }
+      if (S.phase === 'paused') {
+        elOv.innerHTML = '<h2>Paused</h2><p>Press <b>P</b> to resume.</p>';
+        return;
+      }
+      // over — trzy liczniki i nic więcej
+      elOv.innerHTML =
+        '<h2>Ecosystem snapshot</h2>' +
+        '<p>Tier: <b>' + TIERS[S.tier].name + '</b> · best: ' + S.best.toLocaleString('en-US') + ' overlaps</p>' +
+        '<div class="xb-summary">' +
+          '<div><div class="k">Partners connected</div><div class="v">' + S.partners + '</div></div>' +
+          '<div><div class="k">Overlaps found</div><div class="v">' + S.overlaps.toLocaleString('en-US') + '</div></div>' +
+          '<div><div class="k">Distance</div><div class="v">' + Math.round(S.dist / 10) + ' m</div></div>' +
+        '</div>' +
+        '<button class="xb-btn">Play again — R</button>';
+      elOv.querySelector('button').onclick = start;
+    }
+
+    /* =============== start / stop =============== */
+    function start() {
+      S = freshState();
+      syncHud();
+      S.phase = 'running';
+      renderOverlay();
+    }
+
+    function boot() {
+      S = freshState();
+      syncHud();
+      renderOverlay();
+      document.addEventListener('keydown', onKeyDown);
+      document.addEventListener('keyup', onKeyUp);
+      window.addEventListener('blur', function () {
+        if (S.phase === 'running') { S.phase = 'paused'; renderOverlay(); }
+      });
+      lastT = performance.now();
+      raf = requestAnimationFrame(loop);
+    }
+
+    preload(ASSETS, PARTNERS, images, boot);
+
+    return {
+      destroy: function () {
+        cancelAnimationFrame(raf);
+        document.removeEventListener('keydown', onKeyDown);
+        document.removeEventListener('keyup', onKeyUp);
+        root.innerHTML = '';
+      }
+    };
+  }
+
+  /* =================================================================== */
+  /* helpers                                                              */
+  /* =================================================================== */
+  function preload(ASSETS, PARTNERS, images, done) {
+    var jobs = [];
+    function job(key, src) { if (src) jobs.push([key, src]); }
+
+    job('runner', ASSETS.runner && ASSETS.runner.src);
+    job('ground', ASSETS.ground && ASSETS.ground.src);
+    (ASSETS.layers || []).forEach(function (L, i) { job('layer_' + i, L.src); });
+    if (ASSETS.obstacles) {
+      Object.keys(ASSETS.obstacles).forEach(function (k) { job('obs_' + k, ASSETS.obstacles[k].src); });
+    }
+    PARTNERS.forEach(function (p, i) { job('logo_' + i, p.logo); });
+
+    if (!jobs.length) return done();
+    var left = jobs.length;
+    jobs.forEach(function (pair) {
+      var img = new Image();
+      img.onload  = function () { images[pair[0]] = img; if (!--left) done(); };
+      img.onerror = function () { if (!--left) done(); };   // brak pliku → placeholder
+      img.src = pair[1];
+    });
+  }
+
+  function pickWeighted(arr) {
+    var total = 0, i;
+    for (i = 0; i < arr.length; i++) total += arr[i].weight;
+    var r = Math.random() * total;
+    for (i = 0; i < arr.length; i++) { r -= arr[i].weight; if (r <= 0) return arr[i]; }
+    return arr[arr.length - 1];
+  }
+
+  function shuffle(a) {
+    a = a.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+
+  function seedClouds() {
+    var out = [];
+    for (var i = 0; i < 3; i++) {
+      out.push({ x:Math.random() * CFG.W, y:26 + Math.random() * 74, par:0.18 + Math.random() * 0.16 });
+    }
+    return out;
+  }
+
+  function initials(name) {
+    return name.replace(/[^A-Za-z0-9 ]/g, '').split(/\s+/).slice(0, 2)
+               .map(function (w) { return w[0] || ''; }).join('').toUpperCase();
+  }
+
+  function readBest() {
+    try { return parseInt(localStorage.getItem('xb_runner_best') || '0', 10) || 0; } catch (e) { return 0; }
+  }
+  function writeBest(v) {
+    try { localStorage.setItem('xb_runner_best', String(v)); } catch (e) { /* artifact / sandbox */ }
+  }
+
+  function fallbackPartners() {
+    return ['Acme','Contoso','Northwind','Globex','Initech','Vandelay','Zenith Labs','Apex Data',
+            'Nimbus','Vertex IO','Solstice','Kestrel','Lumen Works','Basalt','Cobalt','Onyx Systems',
+            'Pinnacle','Quartz','Radian','Summit Ops','Talon','Umbra','Vega Cloud','Wren']
+      .map(function (n) { return { id:n.toLowerCase().replace(/\s+/g, '-'), name:n, logo:null, blurb:'' }; });
+  }
+
+  window.EcosystemRunner = { mount:mount, TIERS:TIERS, OBSTACLES:OBSTACLES, CFG:CFG };
+})();
+</script>
+
+<script>
+/* =====================================================================
+   KONFIGURACJA — to jest jedyne miejsce, które ruszasz podmieniając assety
+   ===================================================================== */
+
+/* Na razie null-e → silnik rysuje placeholdery.
+   Po przygotowaniu grafik odkomentuj i wskaż ścieżki. Wymiary muszą się
+   zgadzać ze specyfikacją (ecosystem-runner-asset-spec.md). */
+var ASSETS = {
+  /* Warstwy tła, od najdalszej do najbliższej.
+     y      = odległość górnej krawędzi od GÓRY kadru
+     bottom = odległość dolnej krawędzi od DOŁU kadru (semantyka CSS)
+                bottom:0  → przy dolnej krawędzi kadru (y = 300)
+                bottom:48 → przy linii podłoża        (y = 252)
+     par    = 0 statyczna · 0.10 daleka · 0.26 bliska · 1.0 = prędkość podłoża
+     front  = true → rysowana po pasku podłoża, pod przeszkodami i graczem */
+  /* Kolejność w tablicy = kolejność rysowania. Pierwsza jest najdalsza.
+     Docelowy stos: sky → clouds (parallax) → horizon → [podłoże, przeszkody, gracz] */
+  layers: [
+    // 1. SKY — statyczny gradient, pełny kadr, w pełni kryjący. Plik 1440 × 600 = 2× kadru.
+    { src:'assets/sky.png', tileW:720, tileH:300, y:0, par:0 },
+
+    // 2. CLOUDS — tu wejdą chmury, między niebem a horyzontem.
+    //    par musi zostać PONIŻEJ buildings-1 (0.08), bo chmury są najdalszą ruchomą
+    //    warstwą. Dlatego 0.05, a nie 0.10 jak planowałem przed zwolnieniem miasta.
+    // { src:'assets/clouds.png', tileW:960, tileH:300, y:0, par:0.05 },
+
+    // 3. HORIZON — statyczna sylwetka miasta z alfą (52 % pliku przezroczyste).
+    //    Sylwetki startują na y≈46. Plik 1440 × 600 = 2× kadru.
+    { src:'assets/horizon.png', tileW:720, tileH:300, y:0, par:0 },
+
+    /* 4–5. BUILDINGS — dwa plany miasta, oba `bottom:0`, oba kafelkowane.
+       Szew w kaflach jest świadomie ignorowany: pattern ma budynki różnej wysokości,
+       więc zawinięcie nie jest czytelne dla oka.
+
+       Oba plany zwolnione o połowę wobec pierwszej wersji (0.16 → 0.08, 0.40 → 0.20).
+       Proporcja między nimi zostaje 1 : 2,5, więc drabinka głębi jest nienaruszona —
+       zwiększył się tylko dystans do podłoża (z 1 : 2,5 na 1 : 5).                    */
+
+    // 4. BUILDINGS-1 — dalszy plan, bardzo wolny. Plik 1920 × 200 → kafel 960 × 100, y 200–300.
+    { src:'assets/buildings-1.png', tileW:960, tileH:100, bottom:0, par:0.08 },
+
+    // 5. BUILDINGS-2 — bliższy plan, wyższy z-index. Plik 1920 × 140 → kafel 960 × 70, y 230–300.
+    { src:'assets/buildings-2.png', tileW:960, tileH:70, bottom:0, par:0.20 }
+  ],
+
+  // Kolejne warstwy — dodaj, gdy będą gotowe:
+  //   { src:'assets/bg-clouds.png', tileW:960, tileH:90,  y:16,      par:0.12 },
+  //   { src:'assets/bg-far.png',    tileW:960, tileH:130, bottom:48, par:0.10 },
+  //   { src:'assets/bg-near.png',   tileW:960, tileH:70,  bottom:0,  par:0.26, front:true }
+
+  /* Postać. Spritesheet 644 × 112 (7 komórek 92 × 112), klatki w jednym rzędzie.
+     `stride` = długość JEDNEGO kroku w px logicznych. Podanie tej wartości włącza
+     tempo biegu zależne od prędkości gry (13 fps na starcie → 29 fps przy maksimum),
+     dzięki czemu stopy nie ślizgają się po ziemi. `fps` dotyczy wtedy tylko kucnięcia. */
+  /* Plik ma 10 komórek. Zmierzone: klatki 4–7 są pikselowo identyczne z 0–3,
+     więc unikalny cykl biegu to [0,1,2,3]. Zapętlanie 0–7 nic by nie dodało,
+     a rozjechałoby tempo (silnik liczy je z liczby klatek w pętli).
+
+     `stride` = dystans w px, jaki gra przesuwa świat na JEDNĄ pętlę animacji.
+     127 px daje 10,7 fps na starcie i 23,9 fps przy maksymalnej prędkości —
+     górna granica czytelności. Wartość „realistyczna" (~53 px, długość
+     prawdziwego kroku) wymagałaby 57 fps, czyli jednej klatki na odświeżenie
+     ekranu, i cykl zamieniłby się w migotanie. Szczegóły w specyfikacji §3.2. */
+  /* 11 komórek 92 × 112. Klatki 4–7 są duplikatami 0–3, więc pętla biegu to [0,1,2,3].
+     Klatka 10 = zderzenie: pokazywana przez HIT_HOLD sekund po kolizji, zanim wjedzie
+     ekran podsumowania. Wariant kolorystyczny A: 'assets/character-10.png'. */
+  runner: { src:'assets/character.png', frameW:92, frameH:112, fps:12, stride:127,
+            frames:{ run:[0,1,2,3], jump:[8], duck:[9], hit:[10] } },
+  /* Podłoże. Kafelkowane poziomo, przewijane 1:1 z prędkością gry.
+     `surfaceAt` = ile px logicznych od GÓRY kafla znajduje się powierzchnia ziemi.
+     Silnik ustawi ją dokładnie na linii kolizji (y = 252), więc wystarczy podać
+     tę jedną liczbę i grafika zawsze wyląduje idealnie pod stopami gracza.
+
+     POWRÓT DO WARTOŚCI POCZĄTKOWEJ: kafel 960 × 48, bez `bottom` ani `surfaceAt`,
+     czyli górna krawędź siada na linii podłoża → kafel wypełnia dokładnie y 252–300.
+     Oczekiwany plik: 1920 × 96 px.
+
+     Warianty, gdybyś chciał wrócić:
+       { tileW:960, tileH:100, bottom:0 }   → y 200–300, gracz zatopiony za murkiem (plik 1920 × 200)
+       { tileW:960, tileH:200, surfaceAt:152 } → y 100–300, perspektywa gruntu (plik 1920 × 400) */
+  ground: { src:'assets/ground.png', tileW:960, tileH:24 },   // plik 1920 × 48, renderowany 1:1
+  // obstacles: {
+  //   block_s:  { src:'assets/obs-block-s.png'  },
+  //   block_m:  { src:'assets/obs-block-m.png'  },
+  //   block_l:  { src:'assets/obs-block-l.png'  },
+  //   block_xl: { src:'assets/obs-block-xl.png' },
+  //   flyer_lo: { src:'assets/obs-flyer.png', frames:2, frameW:92, frameH:64, fps:8 },
+  //   flyer_hi: { src:'assets/obs-flyer.png', frames:2, frameW:92, frameH:64, fps:8 }
+  // }
+
+  /* Przeszkody naziemne są rysowane od górnej krawędzi kolizji aż do DOŁU KADRU
+     (`bottom: 0`), więc ich pliki są o 24 px logiczne (48 px w 2×) wyższe niż
+     wymiar kolizyjny. Hitbox sięga nadal tylko do linii podłoża — balans bez zmian.
+       block_s   30 × 48  ->  plik  60 × 144
+       block_m   42 × 62  ->  plik  84 × 172
+       block_l   66 × 50  ->  plik 132 × 148   ✅ wgrany
+       block_xl  88 × 44  ->  plik 176 × 136
+     Latające NIE są przedłużane — plik dokładnie 92 × 64 na komórkę.            */
+  obstacles: {
+    block_s: { src:'assets/obstacle-s.png' },   // antena — plik 120 × 288 (4×, renderuje się poprawnie)
+    block_m: { src:'assets/obstacle-m.png'  },   // komin  — plik 168 × 344 (4×)
+    block_l: { src:'assets/obstacle-l.png' },   // komin  — plik 528 × 592 (8×, proporcja 1:1 z docelową)
+    block_xl:{ src:'assets/obstacle-xl.png' },   // grupa trzech kominów — plik 350 × 272 (4×)
+
+    /* Ptak — jeden plik dla obu wysokości. frameW/frameH podaje się w pikselach PLIKU
+       (prostokąt źródłowy), nie logicznych: 368 × 128 = 2 komórki po 184 × 128. */
+    flyer_lo:{ src:'assets/flyer.png', frames:2, frameW:184, frameH:128, fps:8 },
+    flyer_hi:{ src:'assets/flyer.png', frames:2, frameW:184, frameH:128, fps:8 }
+  }
+};
+
+/* Talia partnerów. Logotypy to kafle 160 × 160 z własnym tłem — silnik wpisuje je
+   w koło (clip + skalowanie „cover"), więc nie muszą mieć alfy ani marginesów.
+   Nazwa bierze się z nazwy pliku. Talia jest tasowana i zapętlana w nieskończoność,
+   więc dorzucenie kolejnych partnerów to dopisanie wierszy tutaj. */
+var PARTNERS = [
+  { id:'asterisk',           name:'Asterisk',           logo:'assets/partners/asterisk.png' },
+  { id:'audiowolf',          name:'Audiowolf',          logo:'assets/partners/audiowolf.png' },
+  { id:'bozer-enterprises',  name:'Bozer Enterprises',  logo:'assets/partners/bozer-enterprises.png' },
+  { id:'bravo-bravo',        name:'Bravo Bravo',        logo:'assets/partners/bravo-bravo.png' },
+  { id:'chatterbox',         name:'Chatterbox',         logo:'assets/partners/chatterbox.png' },
+  { id:'farrofarm',          name:'Farrofarm',          logo:'assets/partners/farrofarm.png' },
+  { id:'filman',             name:'Filman',             logo:'assets/partners/filman.png' },
+  { id:'gromit-co',          name:'Gromit Co',          logo:'assets/partners/gromit-co.png' },
+  { id:'hold-the-phone',     name:'Hold The Phone',     logo:'assets/partners/hold-the-phone.png' },
+  { id:'imagination-market', name:'Imagination Market', logo:'assets/partners/imagination-market.png' },
+  { id:'jaxx',               name:'Jaxx',               logo:'assets/partners/jaxx.png' },
+  { id:'ko',                 name:'Ko',                 logo:'assets/partners/ko.png' },
+  { id:'ksaas',              name:'Ksaas',              logo:'assets/partners/ksaas.png' },
+  { id:'meddlin',            name:'Meddlin',            logo:'assets/partners/meddlin.png' },
+  { id:'nazdasks',           name:'Nazdasks',           logo:'assets/partners/nazdasks.png' },
+  { id:'saltblock',          name:'Saltblock',          logo:'assets/partners/saltblock.png' },
+  { id:'sanguine-partners',  name:'Sanguine Partners',  logo:'assets/partners/sanguine-partners.png' },
+  { id:'sign-emporium',      name:'Sign Emporium',      logo:'assets/partners/sign-emporium.png' },
+  { id:'surfzer',            name:'Surfzer',            logo:'assets/partners/surfzer.png' },
+  { id:'tenet',              name:'Tenet',              logo:'assets/partners/tenet.png' }
+];
+
+EcosystemRunner.mount('#game', { assets: ASSETS, partners: PARTNERS });
+</script>
+</body>
+</html>
